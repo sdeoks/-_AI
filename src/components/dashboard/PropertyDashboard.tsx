@@ -282,9 +282,14 @@ export function PropertyDashboard({
             )}
           </div>
         </div>
-        <Button variant="secondary" onClick={handleReanalyze} disabled={reanalyzing}>
-          {reanalyzing ? "재분석 중..." : "재분석 (Mock 재생성)"}
-        </Button>
+        <div className="flex gap-2">
+          <a href={`/properties/${property.id}/report`} target="_blank" rel="noreferrer">
+            <Button variant="outline">웹/인쇄/PDF 리포트 보기</Button>
+          </a>
+          <Button variant="secondary" onClick={handleReanalyze} disabled={reanalyzing}>
+            {reanalyzing ? "재분석 중..." : "재분석 (Mock 재생성)"}
+          </Button>
+        </div>
       </div>
 
       {analysisError && (
