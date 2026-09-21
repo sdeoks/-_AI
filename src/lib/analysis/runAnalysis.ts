@@ -3,8 +3,14 @@ import { mockRealTransactionProvider } from "@/lib/providers/mock/realTransactio
 import { runComparableEngine } from "@/lib/comparable/engine";
 import { createEvidence } from "@/lib/evidence/build";
 import { defaultAnalysisMonths, defaultMaxRadiusMeters } from "./periods";
-import { sampleSizeWarning, type PropertyType } from "@/lib/enums";
+import { sampleSizeWarning, type PropertyType, type DashboardTabKey } from "@/lib/enums";
 import { formatWon } from "@/lib/utils";
+import { runPopulationDomain } from "./domains/population";
+import { runBusinessDomain } from "./domains/business";
+import { runCommercialDistrictDomain } from "./domains/commercialDistrict";
+import { runTransportDomain } from "./domains/transport";
+import { runResidentialBackupDomain } from "./domains/residentialBackup";
+import type { DomainContext, DomainResult } from "./domains/types";
 
 export async function runAnalysisForProperty(propertyId: string) {
   const property = await prisma.property.findUnique({ where: { id: propertyId } });
@@ -149,7 +155,48 @@ export async function runAnalysisForProperty(propertyId: string) {
     })),
   });
 
-  // 4) AI 입지 리포트 생성 (Mock AI Provider — Evidence만 인용, 새 숫자 생성 금지)
+  // 4) Phase 2 도메인 Provider 병렬 실행 — 하나가 실패해도 나머지는 계속 진행 (§58)
+  const domainCtx: DomainContext = {
+    propertyId,
+    property,
+    propertyType,
+    seed: `${property.id}:${property.address}`,
+  };
+
+  const domainSettled = await Promise.allSettled([
+    runPopulationDomain(domainCtx),
+    runBusinessDomain(domainCtx),
+    runCommercialDistrictDomain(domainCtx),
+    runTransportDomain(domainCtx),
+    runResidentialBackupDomain(domainCtx),
+  ]);
+  const domainResults: DomainResult[] = domainSettled.map((r, i) =>
+    r.status === "fulfilled"
+      ? r.value
+      : {
+          tabKey: (["POPULATION", "BUSINESS", "COMMERCIAL_DISTRICT", "TRANSPORT", "RESIDENTIAL_BACKUP"] as const)[i],
+          status: "UNAVAILABLE" as const,
+          completionRate: 0,
+          evidenceIds: [],
+          summary: { error: String(r.reason) },
+        },
+  );
+
+  await prisma.analysisSnapshot.createMany({
+    data: domainResults.map((d) => ({
+      propertyId,
+      tabKey: d.tabKey,
+      completionRate: d.completionRate,
+      status: d.status,
+      summaryJson: JSON.stringify(d.summary),
+    })),
+  });
+
+  const domainByTab = Object.fromEntries(
+    domainResults.map((d) => [d.tabKey, d]),
+  ) as Partial<Record<DashboardTabKey, DomainResult>>;
+
+  // 5) AI 입지 리포트 생성 (Mock AI Provider — Evidence만 인용, 새 숫자 생성 금지)
   const sections = buildAIReportSections({
     property,
     propertyType,
@@ -157,6 +204,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     engineResult,
     transactionEvidenceId: transactionEvidence.id,
     comparableEvidenceId: comparableEvidence.id,
+    domainByTab,
   });
 
   await prisma.aIReport.create({
@@ -167,7 +215,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     },
   });
 
-  // 5) 탭별 손품 완료도 스냅샷 (§55)
+  // 6) 나머지 탭별 손품 완료도 스냅샷 (§55) — Phase 2 도메인은 위에서 이미 저장됨
   const snapshots = [
     { tabKey: "SUMMARY", completionRate: 100, status: "OK" },
     { tabKey: "MAP", completionRate: 100, status: "OK" },
@@ -178,11 +226,6 @@ export async function runAnalysisForProperty(propertyId: string) {
     },
     { tabKey: "TRANSACTION", completionRate: 100, status: "OK" },
     { tabKey: "RENTAL", completionRate: 0, status: "UNAVAILABLE" },
-    { tabKey: "RESIDENTIAL_BACKUP", completionRate: 0, status: "UNAVAILABLE" },
-    { tabKey: "POPULATION", completionRate: 0, status: "UNAVAILABLE" },
-    { tabKey: "BUSINESS", completionRate: 0, status: "UNAVAILABLE" },
-    { tabKey: "COMMERCIAL_DISTRICT", completionRate: 0, status: "UNAVAILABLE" },
-    { tabKey: "TRANSPORT", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "DEVELOPMENT", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "SUPPLY_VACANCY", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "LAND_BUILDING", completionRate: 0, status: "UNAVAILABLE" },
@@ -238,9 +281,23 @@ function buildAIReportSections(args: {
   engineResult: ReturnType<typeof runComparableEngine>;
   transactionEvidenceId: string;
   comparableEvidenceId: string;
+  domainByTab: Partial<Record<DashboardTabKey, DomainResult>>;
 }): AISection[] {
-  const { property, engineResult, transactionEvidenceId, comparableEvidenceId } = args;
+  const { property, engineResult, transactionEvidenceId, comparableEvidenceId, domainByTab } =
+    args;
   const top5 = engineResult.candidates.slice(0, 5);
+
+  const population = domainByTab.POPULATION;
+  const business = domainByTab.BUSINESS;
+  const commercial = domainByTab.COMMERCIAL_DISTRICT;
+  const transport = domainByTab.TRANSPORT;
+  const residential = domainByTab.RESIDENTIAL_BACKUP;
+
+  const popSummary = population?.status === "OK" ? (population.summary as { totalPopulation: number; ageBrackets: { label: string; ratio: number }[] }) : null;
+  const bizSummary = business?.status === "OK" ? (business.summary as { businessCount: number; employeeCount: number; purchasingPowerIndex: number }) : null;
+  const commSummary = commercial?.status === "OK" ? (commercial.summary as { totalStoreCount: number; radiusMeters: number; footfallProxyIndex: number }) : null;
+  const transportSummary = transport?.status === "OK" ? (transport.summary as { nearestSubway: { name: string; distanceMeters: number } | null }) : null;
+  const residentialSummary = residential?.status === "OK" ? (residential.summary as { confirmedHouseholds: number; totalComplexes: number; unconfirmedComplexCount: number }) : null;
 
   const sections: AISection[] = [
     {
@@ -288,6 +345,99 @@ function buildAIReportSections(args: {
       ],
     },
     {
+      key: "RESIDENTIAL_BACKUP",
+      title: "9. 배후주거",
+      status: residentialSummary ? "OK" : "NO_DATA",
+      paragraphs: residentialSummary
+        ? [
+            {
+              text: `반경 내 공동주택 ${residentialSummary.totalComplexes}개 단지 중 확인세대수는 ${residentialSummary.confirmedHouseholds.toLocaleString()}세대이며, ${residentialSummary.unconfirmedComplexCount}개 단지는 세대수가 확인되지 않았습니다.`,
+              evidenceIds: residential?.headlineEvidenceId ? [residential.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "POPULATION_HOUSEHOLDS",
+      title: "10. 인구·가구",
+      status: popSummary ? "OK" : "NO_DATA",
+      paragraphs: popSummary
+        ? [
+            {
+              text: `인근 행정동 인구는 ${popSummary.totalPopulation.toLocaleString()}명이며, 연령대 구성은 ${popSummary.ageBrackets.map((a) => `${a.label} ${(a.ratio * 100).toFixed(1)}%`).join(", ")} 입니다.`,
+              evidenceIds: population?.headlineEvidenceId ? [population.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "BUSINESS_WORKPLACE",
+      title: "11. 직장·사업체",
+      status: bizSummary ? "OK" : "NO_DATA",
+      paragraphs: bizSummary
+        ? [
+            {
+              text: `인근 사업체 ${bizSummary.businessCount.toLocaleString()}개, 종사자 ${bizSummary.employeeCount.toLocaleString()}명이 확인됩니다.`,
+              evidenceIds: business?.evidenceIds.slice(0, 1) ?? [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "PURCHASING_POWER",
+      title: "12. 구매력",
+      status: bizSummary ? "OK" : "NO_DATA",
+      paragraphs: bizSummary
+        ? [
+            {
+              text: `사업체·종사자 구성을 종합한 구매력 추정지수는 ${bizSummary.purchasingPowerIndex}/100입니다. 직접적인 임금 데이터가 아닌 산업구성 기반 추정치입니다.`,
+              evidenceIds: business?.evidenceIds.slice(1, 2) ?? [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "COMMERCIAL_DISTRICT",
+      title: "13. 상권",
+      status: commSummary ? "OK" : "NO_DATA",
+      paragraphs: commSummary
+        ? [
+            {
+              text: `반경 ${commSummary.radiusMeters}m 내 점포수는 ${commSummary.totalStoreCount.toLocaleString()}개입니다.`,
+              evidenceIds: commercial?.evidenceIds.slice(0, 1) ?? [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "FOOTFALL",
+      title: "14. 유동",
+      status: commSummary ? "OK" : "NO_DATA",
+      paragraphs: commSummary
+        ? [
+            {
+              text: `유동인구 추정지수는 ${(commercial!.summary as { footfallProxyIndex: number }).footfallProxyIndex}/100입니다. 실제 유동인구 계측 자료가 아닌 점포밀도 기반 Proxy입니다.`,
+              evidenceIds: commercial?.evidenceIds.slice(1, 2) ?? [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "TRANSPORT",
+      title: "15. 교통",
+      status: transportSummary ? "OK" : "NO_DATA",
+      paragraphs: transportSummary
+        ? [
+            {
+              text: transportSummary.nearestSubway
+                ? `가장 가까운 지하철역은 ${transportSummary.nearestSubway.name}으로 직선거리 약 ${transportSummary.nearestSubway.distanceMeters}m입니다.`
+                : "반경 내 지하철역이 확인되지 않았습니다.",
+              evidenceIds: transport?.headlineEvidenceId ? [transport.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
       key: "STRENGTHS",
       title: "20. 대상물건의 강점",
       status: engineResult.usedSampleCount > 0 ? "OK" : "NO_DATA",
@@ -320,7 +470,7 @@ function buildAIReportSections(args: {
       status: "OK",
       paragraphs: [
         {
-          text: "인구·가구, 사업체·구매력, 상권·유동인구, 교통·생활인프라, 개발계획, 공급·공실, 임대시장, 경매 낙찰사례는 이번 분석에서 공식 데이터 연동이 아직 구현되지 않아 다루지 않았습니다 (§ 데이터 근거 탭 참고).",
+          text: "임대시장, 경매 낙찰사례, 개발계획, 신규공급·공실위험, 토지·건물 상세정보는 이번 분석에서 공식 데이터 연동이 아직 구현되지 않아 다루지 않았습니다. 인구·사업체·상권·교통·배후주거는 [MOCK] 데이터 기반입니다 (§ 데이터 근거 탭 참고).",
           evidenceIds: [],
         },
       ],

@@ -14,6 +14,11 @@ import { TransactionTab } from "./TransactionTab";
 import { AIReportTab, type AISection } from "./AIReportTab";
 import { EvidenceTab } from "./EvidenceTab";
 import { NotImplementedTab } from "./NotImplementedTab";
+import { PopulationTab, type PopulationSummary } from "./PopulationTab";
+import { BusinessTab, type BusinessSummary } from "./BusinessTab";
+import { CommercialDistrictTab, type CommercialDistrictSummary } from "./CommercialDistrictTab";
+import { TransportTab, type TransportSummary } from "./TransportTab";
+import { ResidentialBackupTab, type ResidentialBackupSummary } from "./ResidentialBackupTab";
 
 interface PropertyLike {
   id: string;
@@ -67,13 +72,14 @@ export function PropertyDashboard({
   property,
   evidences,
   comparableCases,
+  snapshots,
   aiReport,
   analysisError,
 }: {
   property: PropertyLike;
   evidences: EvidenceRaw[];
   comparableCases: ComparableCaseRow[];
-  snapshots: { tabKey: string; completionRate: number; status: string }[];
+  snapshots: { tabKey: string; completionRate: number; status: string; summaryJson: string }[];
   aiReport: { sections: AISection[] } | null;
   analysisError: string | null;
 }) {
@@ -93,6 +99,31 @@ export function PropertyDashboard({
 
   const overallEvidence = evidenceCards.find((e) => e.analysisCategory === "REAL_TRANSACTION_OVERALL") ?? null;
   const comparableEvidence = evidenceCards.find((e) => e.analysisCategory === "COMPARABLE_SUMMARY") ?? null;
+  const populationEvidence = evidenceCards.find((e) => e.analysisCategory === "POPULATION_TOTAL") ?? null;
+  const businessCountEvidence = evidenceCards.find((e) => e.analysisCategory === "BUSINESS_COUNT") ?? null;
+  const purchasingPowerEvidence = evidenceCards.find((e) => e.analysisCategory === "PURCHASING_POWER_INDEX") ?? null;
+  const storeCountEvidence = evidenceCards.find((e) => e.analysisCategory === "COMMERCIAL_STORE_COUNT") ?? null;
+  const footfallEvidence = evidenceCards.find((e) => e.analysisCategory === "FOOTFALL_PROXY") ?? null;
+  const transportEvidence = evidenceCards.find((e) => e.analysisCategory === "TRANSPORT_NEAREST") ?? null;
+  const residentialEvidence = evidenceCards.find((e) => e.analysisCategory === "RESIDENTIAL_BACKUP_HOUSEHOLDS") ?? null;
+
+  const snapshotByTab = useMemo(() => {
+    const map = new Map<string, unknown>();
+    for (const s of snapshots) {
+      try {
+        map.set(s.tabKey, JSON.parse(s.summaryJson));
+      } catch {
+        map.set(s.tabKey, null);
+      }
+    }
+    return map;
+  }, [snapshots]);
+
+  const populationSummary = snapshotByTab.get("POPULATION") as PopulationSummary | null;
+  const businessSummary = snapshotByTab.get("BUSINESS") as BusinessSummary | null;
+  const commercialSummary = snapshotByTab.get("COMMERCIAL_DISTRICT") as CommercialDistrictSummary | null;
+  const transportSummary = snapshotByTab.get("TRANSPORT") as TransportSummary | null;
+  const residentialSummary = snapshotByTab.get("RESIDENTIAL_BACKUP") as ResidentialBackupSummary | null;
 
   const transactionPoints = (overallEvidence?.rawDataRecords ?? []).map((r) => {
     const payload = JSON.parse(r.payload);
@@ -124,13 +155,17 @@ export function PropertyDashboard({
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {overallEvidence && <EvidenceCard evidence={overallEvidence} />}
             {comparableEvidence && <EvidenceCard evidence={comparableEvidence} />}
-            <KpiPlaceholder label="배후세대" />
-            <KpiPlaceholder label="인구" />
-            <KpiPlaceholder label="사업체·종사자" />
-            <KpiPlaceholder label="교통" />
-            <KpiPlaceholder label="상권활력" />
-            <KpiPlaceholder label="유동인구(Proxy)" />
+            {residentialEvidence && <EvidenceCard evidence={residentialEvidence} />}
+            {populationEvidence && <EvidenceCard evidence={populationEvidence} />}
+            {businessCountEvidence && <EvidenceCard evidence={businessCountEvidence} />}
+            {transportEvidence && <EvidenceCard evidence={transportEvidence} />}
+            {storeCountEvidence && <EvidenceCard evidence={storeCountEvidence} />}
+            {purchasingPowerEvidence && <EvidenceCard evidence={purchasingPowerEvidence} />}
+            {footfallEvidence && <EvidenceCard evidence={footfallEvidence} />}
+            <KpiPlaceholder label="유사 경매 낙찰" />
+            <KpiPlaceholder label="유사 임대료" />
             <KpiPlaceholder label="개발계획" />
+            <KpiPlaceholder label="신규공급" />
             <KpiPlaceholder label="공실위험" />
           </div>
         );
@@ -172,37 +207,27 @@ export function PropertyDashboard({
           />
         );
       case "RESIDENTIAL_BACKUP":
-        return (
-          <NotImplementedTab
-            title="⑥ 배후주거"
-            candidateSources={["한국부동산원 공동주택 단지정보", "국토교통부 건축물대장"]}
-          />
-        );
+        return <ResidentialBackupTab evidence={residentialEvidence} summary={residentialSummary} />;
       case "POPULATION":
-        return (
-          <NotImplementedTab title="⑦ 인구·세대" candidateSources={["통계청 SGIS", "KOSIS"]} />
-        );
+        return <PopulationTab evidence={populationEvidence} summary={populationSummary} />;
       case "BUSINESS":
         return (
-          <NotImplementedTab
-            title="⑧ 직장·사업체·구매력"
-            candidateSources={["통계청 전국사업체조사", "고용노동부 임금통계(KOSIS)"]}
+          <BusinessTab
+            countEvidence={businessCountEvidence}
+            purchasingPowerEvidence={purchasingPowerEvidence}
+            summary={businessSummary}
           />
         );
       case "COMMERCIAL_DISTRICT":
         return (
-          <NotImplementedTab
-            title="⑨ 상권·유동인구"
-            candidateSources={["소상공인시장진흥공단 상가(상권)정보"]}
+          <CommercialDistrictTab
+            storeEvidence={storeCountEvidence}
+            footfallEvidence={footfallEvidence}
+            summary={commercialSummary}
           />
         );
       case "TRANSPORT":
-        return (
-          <NotImplementedTab
-            title="⑩ 교통·생활인프라"
-            candidateSources={["국가대중교통정보센터(TAGO)", "지자체 교통공사 승하차 자료"]}
-          />
-        );
+        return <TransportTab evidence={transportEvidence} summary={transportSummary} />;
       case "DEVELOPMENT":
         return (
           <NotImplementedTab
