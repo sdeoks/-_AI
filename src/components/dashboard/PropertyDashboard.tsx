@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, type TabItem } from "@/components/ui/tabs";
 import { DASHBOARD_TABS, PROPERTY_TYPE_LABELS, type PropertyType } from "@/lib/enums";
@@ -20,6 +20,8 @@ import { CommercialDistrictTab, type CommercialDistrictSummary } from "./Commerc
 import { TransportTab, type TransportSummary } from "./TransportTab";
 import { ResidentialBackupTab, type ResidentialBackupSummary } from "./ResidentialBackupTab";
 import { RentalTab, type RentalSummary } from "./RentalTab";
+import { DevelopmentTab, type DevelopmentSummary } from "./DevelopmentTab";
+import { SupplyVacancyTab, type SupplyVacancySummary } from "./SupplyVacancyTab";
 
 interface PropertyLike {
   id: string;
@@ -108,6 +110,8 @@ export function PropertyDashboard({
   const transportEvidence = evidenceCards.find((e) => e.analysisCategory === "TRANSPORT_NEAREST") ?? null;
   const residentialEvidence = evidenceCards.find((e) => e.analysisCategory === "RESIDENTIAL_BACKUP_HOUSEHOLDS") ?? null;
   const rentalEvidence = evidenceCards.find((e) => e.analysisCategory === "RENTAL_EXPECTED_MONTHLY") ?? null;
+  const developmentEvidence = evidenceCards.find((e) => e.analysisCategory === "DEVELOPMENT_PLANS") ?? null;
+  const vacancyEvidence = evidenceCards.find((e) => e.analysisCategory === "VACANCY_RISK") ?? null;
 
   const transactionComparableCases = comparableCases.filter(
     (c) => c.caseType !== "AUCTION" && c.caseType !== "RENTAL",
@@ -132,6 +136,9 @@ export function PropertyDashboard({
   const transportSummary = snapshotByTab.get("TRANSPORT") as TransportSummary | null;
   const residentialSummary = snapshotByTab.get("RESIDENTIAL_BACKUP") as ResidentialBackupSummary | null;
   const rentalSummary = snapshotByTab.get("RENTAL") as RentalSummary | null;
+  const developmentSummary = snapshotByTab.get("DEVELOPMENT") as DevelopmentSummary | null;
+  const supplyVacancySummary = snapshotByTab.get("SUPPLY_VACANCY") as SupplyVacancySummary | null;
+  const competitionByCategory = commercialSummary?.byCategory ?? null;
 
   const transactionPoints = (overallEvidence?.rawDataRecords ?? []).map((r) => {
     const payload = JSON.parse(r.payload);
@@ -170,11 +177,9 @@ export function PropertyDashboard({
             {storeCountEvidence && <EvidenceCard evidence={storeCountEvidence} />}
             {purchasingPowerEvidence && <EvidenceCard evidence={purchasingPowerEvidence} />}
             {footfallEvidence && <EvidenceCard evidence={footfallEvidence} />}
-            <KpiPlaceholder label="유사 경매 낙찰" />
-            <KpiPlaceholder label="유사 임대료" />
-            <KpiPlaceholder label="개발계획" />
-            <KpiPlaceholder label="신규공급" />
-            <KpiPlaceholder label="공실위험" />
+            {rentalEvidence && <EvidenceCard evidence={rentalEvidence} />}
+            {developmentEvidence && <EvidenceCard evidence={developmentEvidence} />}
+            {vacancyEvidence && <EvidenceCard evidence={vacancyEvidence} />}
           </div>
         );
       case "MAP":
@@ -234,17 +239,13 @@ export function PropertyDashboard({
       case "TRANSPORT":
         return <TransportTab evidence={transportEvidence} summary={transportSummary} />;
       case "DEVELOPMENT":
-        return (
-          <NotImplementedTab
-            title="⑪ 개발계획"
-            candidateSources={["도시계획정보서비스(UPIS)", "지자체 도시계획 공고"]}
-          />
-        );
+        return <DevelopmentTab evidence={developmentEvidence} summary={developmentSummary} />;
       case "SUPPLY_VACANCY":
         return (
-          <NotImplementedTab
-            title="⑫ 공급·공실·경쟁"
-            candidateSources={["한국부동산원 상업용부동산 임대동향조사(공표자료)"]}
+          <SupplyVacancyTab
+            evidence={vacancyEvidence}
+            summary={supplyVacancySummary}
+            competitionByCategory={competitionByCategory}
           />
         );
       case "LAND_BUILDING":
@@ -292,19 +293,6 @@ export function PropertyDashboard({
 
       <Tabs items={items} activeKey={tabKey} onChange={setTabKey} />
     </div>
-  );
-}
-
-function KpiPlaceholder({ label }: { label: string }) {
-  return (
-    <Card className="opacity-60">
-      <CardHeader>
-        <CardTitle>{label}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-sm text-slate-400">데이터 연결 안 됨</p>
-      </CardContent>
-    </Card>
   );
 }
 

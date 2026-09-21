@@ -12,6 +12,8 @@ import { runTransportDomain } from "./domains/transport";
 import { runResidentialBackupDomain } from "./domains/residentialBackup";
 import { runRentalDomain } from "./domains/rental";
 import { runAuctionComparableDomain } from "./domains/auctionComparable";
+import { runDevelopmentDomain } from "./domains/development";
+import { runSupplyVacancyDomain } from "./domains/supplyVacancy";
 import type { DomainContext, DomainResult } from "./domains/types";
 
 export async function runAnalysisForProperty(propertyId: string) {
@@ -172,6 +174,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     "TRANSPORT",
     "RESIDENTIAL_BACKUP",
     "RENTAL",
+    "DEVELOPMENT",
   ] as const;
   const domainSettled = await Promise.allSettled([
     runPopulationDomain(domainCtx),
@@ -180,6 +183,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     runTransportDomain(domainCtx),
     runResidentialBackupDomain(domainCtx),
     runRentalDomain(domainCtx),
+    runDevelopmentDomain(domainCtx),
   ]);
   const domainResults: DomainResult[] = domainSettled.map((r, i) =>
     r.status === "fulfilled"
@@ -192,6 +196,27 @@ export async function runAnalysisForProperty(propertyId: string) {
           summary: { error: String(r.reason) },
         },
   );
+
+  // 공실위험 Proxy는 상권 도메인의 유동인구 지수를 참고하므로 위 배치 완료 후 실행
+  const commercialForVacancy = domainResults.find((d) => d.tabKey === "COMMERCIAL_DISTRICT");
+  const footfallProxyIndex =
+    commercialForVacancy?.status === "OK"
+      ? (commercialForVacancy.summary as { footfallProxyIndex: number }).footfallProxyIndex
+      : undefined;
+  const supplyVacancySettled = await Promise.allSettled([
+    runSupplyVacancyDomain(domainCtx, footfallProxyIndex),
+  ]);
+  const supplyVacancyResult: DomainResult =
+    supplyVacancySettled[0].status === "fulfilled"
+      ? supplyVacancySettled[0].value
+      : {
+          tabKey: "SUPPLY_VACANCY",
+          status: "UNAVAILABLE",
+          completionRate: 0,
+          evidenceIds: [],
+          summary: { error: String(supplyVacancySettled[0].reason) },
+        };
+  domainResults.push(supplyVacancyResult);
 
   // 경매 낙찰사례는 ③ 유사사례 탭에 속하므로(§13) 별도 AnalysisSnapshot을 만들지 않고
   // Evidence/ComparableCase만 기존 COMPARABLE 스냅샷에 얹는다.
@@ -254,8 +279,6 @@ export async function runAnalysisForProperty(propertyId: string) {
       status: engineResult.usedSampleCount > 0 ? "OK" : "PARTIAL",
     },
     { tabKey: "TRANSACTION", completionRate: 100, status: "OK" },
-    { tabKey: "DEVELOPMENT", completionRate: 0, status: "UNAVAILABLE" },
-    { tabKey: "SUPPLY_VACANCY", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "LAND_BUILDING", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "AI_REPORT", completionRate: 100, status: "OK" },
     { tabKey: "EVIDENCE", completionRate: 100, status: "OK" },
@@ -344,6 +367,10 @@ function buildAIReportSections(args: {
   const commSummary = commercial?.status === "OK" ? (commercial.summary as { totalStoreCount: number; radiusMeters: number; footfallProxyIndex: number }) : null;
   const transportSummary = transport?.status === "OK" ? (transport.summary as { nearestSubway: { name: string; distanceMeters: number } | null }) : null;
   const residentialSummary = residential?.status === "OK" ? (residential.summary as { confirmedHouseholds: number; totalComplexes: number; unconfirmedComplexCount: number }) : null;
+  const development = domainByTab.DEVELOPMENT;
+  const supplyVacancy = domainByTab.SUPPLY_VACANCY;
+  const devSummary = development?.status === "OK" ? (development.summary as { items: { sourceType: string }[] }) : null;
+  const supplySummary = supplyVacancy?.status === "OK" ? (supplyVacancy.summary as { supplyItems: unknown[]; vacancyLevel: string; vacancyProxyFactors: string[] }) : null;
 
   const sections: AISection[] = [
     {
@@ -513,6 +540,45 @@ function buildAIReportSections(args: {
         : [],
     },
     {
+      key: "DEVELOPMENT_PLAN",
+      title: "17. 개발계획",
+      status: devSummary ? "OK" : "NO_DATA",
+      paragraphs: devSummary
+        ? [
+            {
+              text: `반경 내 개발계획 관련 항목 ${devSummary.items.length}건이 확인됩니다 (공식계획 ${devSummary.items.filter((it) => it.sourceType === "OFFICIAL_PLAN").length}건, 언론보도 ${devSummary.items.filter((it) => it.sourceType === "NEWS").length}건). 이 항목들은 데모용 [MOCK] 예시이며 실제 확정 사업 정보가 아닙니다.`,
+              evidenceIds: development?.headlineEvidenceId ? [development.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "SUPPLY_RISK",
+      title: "18. 공급위험",
+      status: supplySummary ? "OK" : "NO_DATA",
+      paragraphs: supplySummary
+        ? [
+            {
+              text: `반경 내 신규 공급 예정 ${supplySummary.supplyItems.length}건이 확인됩니다. 개발호재가 수요증가와 경쟁공급 증가를 동시에 의미할 수 있어 양면으로 검토가 필요합니다.`,
+              evidenceIds: supplyVacancy?.headlineEvidenceId ? [supplyVacancy.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "VACANCY_RISK",
+      title: "19. 공실위험",
+      status: supplySummary ? "OK" : "NO_DATA",
+      paragraphs: supplySummary
+        ? [
+            {
+              text: `공실위험은 "${supplySummary.vacancyLevel}" 수준으로 추정됩니다. 실제 공실률 통계가 아닌 Proxy 기반 추정치입니다 (근거: ${supplySummary.vacancyProxyFactors.join(", ")}).`,
+              evidenceIds: supplyVacancy?.headlineEvidenceId ? [supplyVacancy.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
       key: "STRENGTHS",
       title: "20. 대상물건의 강점",
       status: engineResult.usedSampleCount > 0 ? "OK" : "NO_DATA",
@@ -545,7 +611,7 @@ function buildAIReportSections(args: {
       status: "OK",
       paragraphs: [
         {
-          text: "개발계획, 신규공급·공실위험, 토지·건물 상세정보는 이번 분석에서 공식 데이터 연동이 아직 구현되지 않아 다루지 않았습니다. 인구·사업체·상권·교통·배후주거·임대·경매는 모두 [MOCK] 데이터 기반입니다 (§ 데이터 근거 탭 참고).",
+          text: "토지·건물 상세정보(건축물대장, 토지이용계획)와 환경·위험 정보는 이번 분석에서 공식 데이터 연동이 아직 구현되지 않아 다루지 않았습니다. 인구·사업체·상권·교통·배후주거·임대·경매·개발계획·공급공실은 모두 [MOCK] 데이터 기반입니다 (§ 데이터 근거 탭 참고).",
           evidenceIds: [],
         },
       ],
