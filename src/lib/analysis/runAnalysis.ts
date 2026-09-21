@@ -1,5 +1,8 @@
 import { prisma } from "@/lib/db";
 import { mockRealTransactionProvider } from "@/lib/providers/mock/realTransaction";
+import { molitRealTransactionProvider } from "@/lib/providers/live/realTransactionMolit";
+import { isLiveRealTransactionEnabled } from "@/lib/providers/realTransactionSelector";
+import type { EvidenceInput } from "@/lib/providers/types";
 import { runComparableEngine } from "@/lib/comparable/engine";
 import { createEvidence } from "@/lib/evidence/build";
 import { defaultAnalysisMonths, defaultMaxRadiusMeters } from "./periods";
@@ -36,31 +39,31 @@ export async function runAnalysisForProperty(propertyId: string) {
     prisma.aIReport.deleteMany({ where: { propertyId } }),
   ]);
 
-  // 1) Mock 실거래 Provider 호출 (Provider 격리: 실패해도 아래 catch에서 처리)
-  const txResult = await mockRealTransactionProvider.fetch({
-    lat: property.lat,
-    lng: property.lng,
-    propertyType,
-    radiusMeters: maxRadius,
-    monthsBack,
-    targetExclusiveArea: property.exclusiveArea ?? undefined,
-    seed: `${property.id}:${property.address}`,
-  });
+  // 1) 실거래 Provider 호출 — live 조건 충족 시 국토교통부 API, 아니면 Mock.
+  // 어느 쪽이든 실패해도(§58) 아래에서 빈 배열로 안전하게 이어가며 다른 탭은
+  // 계속 분석한다 (실거래만 실패해도 전체 분석이 죽지 않는다).
+  const useLive = isLiveRealTransactionEnabled(propertyType);
+  const txResult = useLive
+    ? await molitRealTransactionProvider.fetch({
+        address: property.address,
+        lat: property.lat,
+        lng: property.lng,
+        monthsBack,
+        targetExclusiveArea: property.exclusiveArea ?? undefined,
+        seed: `${property.id}:${property.address}`,
+      })
+    : await mockRealTransactionProvider.fetch({
+        lat: property.lat,
+        lng: property.lng,
+        propertyType,
+        radiusMeters: maxRadius,
+        monthsBack,
+        targetExclusiveArea: property.exclusiveArea ?? undefined,
+        seed: `${property.id}:${property.address}`,
+      });
 
-  if (!txResult.ok || !txResult.data) {
-    await prisma.analysisSnapshot.create({
-      data: {
-        propertyId,
-        tabKey: "TRANSACTION",
-        completionRate: 0,
-        status: "UNAVAILABLE",
-        summaryJson: JSON.stringify({ error: txResult.error }),
-      },
-    });
-    return { ok: false as const, error: txResult.error };
-  }
-
-  const records = txResult.data.records;
+  const records = txResult.ok && txResult.data ? txResult.data.records : [];
+  const txFailureMessage = !txResult.ok ? (txResult.error?.message ?? "실거래 데이터 조회 실패") : null;
 
   // 가격 추세 참고용: 분석기간을 절반으로 나눠 전반기/후반기 ㎡당 단가 중앙값 비교
   // (§7, §31 — 별도 가격지수 없이 원자료로 계산한 [계산] 값)
@@ -71,19 +74,34 @@ export async function runAnalysisForProperty(propertyId: string) {
   const { computePriceStats } = await import("@/lib/comparable/stats");
   const overallStats = computePriceStats(allPrices);
 
+  const transactionEvidenceInput: EvidenceInput =
+    txResult.ok && txResult.evidence
+      ? {
+          ...txResult.evidence,
+          radiusMeters: useLive ? undefined : maxRadius,
+          usedSampleCount: records.length,
+          rawSampleCount: records.length,
+          filterDescription: useLive
+            ? `법정동 매칭 지역, 최근 ${monthsBack}개월`
+            : `반경 ${maxRadius}m, 최근 ${monthsBack}개월`,
+        }
+      : {
+          sourceOrganization: "국토교통부",
+          sourceDataset: `${propertyLabel(propertyType)} 실거래가 자료`,
+          evidenceType: "UNVERIFIED",
+          rawSampleCount: 0,
+          usedSampleCount: 0,
+          limitations: txFailureMessage ?? "실거래 데이터를 가져오지 못했습니다.",
+          isMock: false,
+        };
+
   const transactionEvidence = await createEvidence({
     propertyId,
     analysisCategory: "REAL_TRANSACTION_OVERALL",
     metricLabel: `${propertyLabel(propertyType)} 실거래 중앙값`,
     metricValue: String(overallStats.median),
     metricUnit: "원",
-    input: {
-      ...txResult.evidence!,
-      radiusMeters: maxRadius,
-      usedSampleCount: records.length,
-      rawSampleCount: records.length,
-      filterDescription: `반경 ${maxRadius}m, 최근 ${monthsBack}개월`,
-    },
+    input: transactionEvidenceInput,
     rawRecords: records.slice(0, 100).map((r) => ({
       label: `${r.transactionDate} · ${r.complexName ?? ""} ${r.exclusiveArea}㎡`,
       payload: r,
@@ -120,11 +138,14 @@ export async function runAnalysisForProperty(propertyId: string) {
     avgSimilarity,
     input: {
       sourceOrganization: "국토교통부",
-      sourceDataset: `${propertyLabel(propertyType)} 실거래가 자료 [MOCK]`,
+      sourceDataset: useLive
+        ? `${propertyLabel(propertyType)} 실거래가 상세 자료 (RTMSDataSvcAptTradeDev)`
+        : `${propertyLabel(propertyType)} 실거래가 자료 [MOCK]`,
+      sourceUrl: useLive ? "https://www.data.go.kr/data/15126468/openapi.do" : undefined,
       dataPeriodStart: monthsAgoDate(monthsBack),
       dataPeriodEnd: new Date(),
-      geographicUnit: "반경",
-      radiusMeters: engineResult.stageUsedMeters,
+      geographicUnit: useLive ? "법정동 매칭" : "반경",
+      radiusMeters: useLive ? undefined : engineResult.stageUsedMeters,
       rawSampleCount: engineResult.rawSampleCount,
       excludedSampleCount: engineResult.excludedSampleCount,
       usedSampleCount: engineResult.usedSampleCount,
@@ -132,10 +153,11 @@ export async function runAnalysisForProperty(propertyId: string) {
         ? `유사사례 부족으로 기준을 70 → ${engineResult.cutoffUsed}로 완화함`
         : `유사도 ${engineResult.cutoffUsed} 이상`,
       calculationMethod: "유사도 가중 중앙값 (이상치 제외)",
-      evidenceType: "REAL_TRANSACTION",
-      limitations:
-        "본 데이터는 실제 국토교통부 API가 아직 연결되지 않아 생성된 [MOCK] 데이터입니다.",
-      isMock: true,
+      evidenceType: txFailureMessage ? "UNVERIFIED" : "REAL_TRANSACTION",
+      limitations: useLive
+        ? `실제 국토교통부 API 응답 기반입니다. 원자료에 좌표가 없어 거리는 동일 법정동 여부로 근사(Proxy)한 값이며, 실제 미터 단위 거리가 아닙니다.${txFailureMessage ? ` 조회 실패: ${txFailureMessage}` : ""}`
+        : "본 데이터는 실제 국토교통부 API가 아직 연결되지 않아 생성된 [MOCK] 데이터입니다.",
+      isMock: !useLive,
     },
     rawRecords: engineResult.candidates.map((c) => ({
       label: `${c.record.transactionDate} · ${c.record.complexName ?? ""} ${c.record.exclusiveArea}㎡ · 유사도 ${c.score}`,
@@ -286,7 +308,11 @@ export async function runAnalysisForProperty(propertyId: string) {
       completionRate: engineResult.usedSampleCount >= 6 ? 100 : 60,
       status: engineResult.usedSampleCount > 0 ? "OK" : "PARTIAL",
     },
-    { tabKey: "TRANSACTION", completionRate: 100, status: "OK" },
+    {
+      tabKey: "TRANSACTION",
+      completionRate: records.length > 0 ? 100 : 0,
+      status: records.length > 0 ? "OK" : "UNAVAILABLE",
+    },
     { tabKey: "AI_REPORT", completionRate: 100, status: "OK" },
     { tabKey: "EVIDENCE", completionRate: 100, status: "OK" },
   ] as const;

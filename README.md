@@ -33,7 +33,7 @@ AI 입지 리포트 23섹션(Evidence만 인용) → 웹/인쇄/PDF 리포트
 | 지오코딩 | ⚠️ **Mock만** 구현 (결정론적 가짜 좌표, VWorld/Kakao/Naver 미연동) |
 | ② 지도 | ⚠️ 실제 지도 타일 대신 좌표 기반 SVG 산점도 (MapProvider 미연동) |
 | ③ 유사사례 (실거래+경매) | ✅ Comparable Engine 동작 (물건종류별 가중치, 단계적 반경 확대, 유사도 등급/완화, 이상치 표시) + 경매물건일 때 낙찰사례 표 |
-| ④ 실거래·가격 | ✅ Mock 실거래 데이터 + 거래 시점별 가격 차트 |
+| ④ 실거래·가격 | ⚠️ **아파트만 live 연동 가능** (국토교통부 실거래가 상세 API), 그 외 물건종류/기본값은 Mock — 아래 "국토교통부 실거래가 live 연동" 참고 |
 | ⑤ 임대시장 | ✅ Mock, 실제계약/호가 구분 |
 | ⑥ 배후주거 | ✅ Mock, 세대수 미확인 단지도 숨기지 않고 표시 |
 | ⑦ 인구·세대 | ✅ Mock (연령대 구성, 5년 추세) |
@@ -51,6 +51,45 @@ AI 입지 리포트 23섹션(Evidence만 인용) → 웹/인쇄/PDF 리포트
 
 **Mock 데이터는 항상 `[DEMO]`/`[MOCK]` 배지로 표시되며 실제 공공데이터처럼 보이지 않게
 설계했습니다.**
+
+## 국토교통부 실거래가 live 연동 (⚠️ 이 세션에서 미검증)
+
+아파트 실거래 데이터는 공공데이터포털의 **"국토교통부_아파트 매매 실거래가 상세 자료"**
+(서비스명 `RTMSDataSvcAptTradeDev`)를 호출하도록 구현했습니다
+(`src/lib/providers/live/realTransactionMolit.ts`).
+
+**중요: 이 코드는 실제로 호출/검증되지 않았습니다.** 이 저장소를 만든 Claude Code 세션은
+샌드박스 네트워크 정책상 `data.go.kr` / `apis.data.go.kr`를 포함한 모든 한국 공공기관
+도메인에 접속할 수 없어서, 공식 API 문서를 직접 열람하거나 실제 요청·응답을 확인하지
+못한 채로 작성했습니다 (배포된 앱 자체는 이 제약과 무관하게 정상 동작해야 합니다).
+구현은 수년간 커뮤니티에 안정적으로 알려진 스펙을 기반으로 했으나, 다음을 **반드시 직접
+검증**해야 합니다:
+
+1. 요청 URL/파라미터명(`LAWD_CD`, `DEAL_YMD`, `serviceKey`, `numOfRows`, `pageNo`)이
+   현재도 유효한지
+2. 응답 XML의 필드명(`거래금액`, `건축년도`, `년/월/일`, `아파트`, `전용면적`, `지번`,
+   `법정동`, `층` 등)과 `resultCode` 성공값("00" 또는 "000")이 맞는지
+3. 서비스키는 data.go.kr에서 발급되는 **"Decoding(디코딩)" 키**를 사용해야 함
+
+**활성화 방법**: `.env.local`에 `PROVIDER_MODE=live`와 `DATA_GO_KR_API_KEY=<디코딩 키>`를
+설정하면, **아파트 물건**에 한해 이 Provider가 사용됩니다. 그 외 물건종류는 아직 live
+Provider가 없어 항상 Mock을 사용합니다.
+
+**알려진 구조적 한계** (API 자체의 한계이지 구현 실수가 아닙니다):
+
+- 이 API는 **좌표를 제공하지 않습니다.** 거래 건의 지도 위치/거리는 대상물건 좌표를
+  그대로 재사용하고, "동일 법정동이면 0m, 아니면 800m"라는 근사(Proxy)로 거리를
+  추정합니다 — 실제 미터 단위 거리가 아닙니다. Evidence의 `limitations`에 항상 이 사실을
+  표시합니다.
+- 지역은 **법정동코드(LAWD_CD)** 로 지정해야 하는데, `src/lib/reference/lawdCode.ts`의
+  매핑 표가 서울 25개구와 수원·성남(광교 데모 지역)만 채워져 있습니다. 표에 없는 지역은
+  임의로 추측하지 않고 조회 실패로 처리합니다 — **실사용 전 전국 표로 확장 필요**
+  (공식 목록: 행정표준코드관리시스템, 이 세션에서 접근 불가했음).
+- 월 단위 조회만 지원해 `monthsBack`만큼 매월 API를 반복 호출하며, 과도한 호출을 막기
+  위해 최대 12개월로 제한합니다.
+- 실거래 조회가 실패해도(키 없음/지역 미매핑/API 오류) 전체 분석이 중단되지 않고, 해당
+  Evidence가 `[미확인]` 배지와 실패 사유를 담은 채로 표시되며 다른 탭은 정상 진행됩니다
+  (Provider 격리 원칙, §58).
 
 ## 실행 방법
 
@@ -105,9 +144,12 @@ CommercialDistrictProvider · TransportProvider(+POI) · ApartmentComplexProvide
 RentalProvider · AuctionComparableProvider · DevelopmentProvider · SupplyVacancyProvider ·
 LandBuildingProvider · MockGeocodeAdapter`
 
-**live 모드(실제 공식 API) Provider는 아직 하나도 구현되지 않았습니다.**
-`src/lib/providers/stubs.ts`의 `NotConnectedProvider`가 향후 live Provider의
-공통 fallback(키 미설정 시 "데이터 연결 안 됨")으로 재사용될 예정입니다.
+**live 모드(실제 공식 API) Provider는 `src/lib/providers/live/realTransactionMolit.ts`
+(국토교통부 아파트 실거래, `PROVIDER_MODE=live` + `DATA_GO_KR_API_KEY` 필요) 1종만
+구현되어 있고, 이마저도 이 세션의 네트워크 제약으로 실제 호출 검증은 못 했습니다**
+(자세한 내용은 위 "국토교통부 실거래가 live 연동" 섹션 참고). 나머지 11종은 아직
+Mock만 존재합니다. `src/lib/providers/stubs.ts`의 `NotConnectedProvider`가 향후 다른
+live Provider의 공통 fallback(키 미설정 시 "데이터 연결 안 됨")으로 재사용될 예정입니다.
 
 ### Comparable Engine (§13~30)
 
