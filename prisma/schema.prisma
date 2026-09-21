@@ -1,0 +1,273 @@
+// 사백나나 입지랩 AI — Prisma Schema
+// dev: SQLite (better-sqlite3 driver adapter) / prod: PostgreSQL 전환 가능
+// SQLite는 enum/배열을 지원하지 않으므로, enum 성격의 값은 모두 String으로 저장하고
+// TypeScript 유니온 타입 + zod로 애플리케이션 레벨에서 검증한다 (src/lib/enums.ts 참조).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ─────────────────────────────────────────────────────────────
+// 물건 (Property)
+// ─────────────────────────────────────────────────────────────
+model Property {
+  id String @id @default(cuid())
+
+  // 필수 입력
+  name    String // 관리용 물건명
+  address String // 지번/도로명 주소
+
+  // 좌표 (지오코딩 결과)
+  lat Float?
+  lng Float?
+  geocodeSourceProvider String? // 어떤 지오코딩 Provider를 사용했는지
+  geocodeConfidence     String? // 'exact' | 'approximate' | 'failed'
+
+  // 선택 입력
+  buildingName  String?
+  dongHo        String? // 동/호
+  propertyType  String // PropertyType (§8) — apartment/officetel/... (src/lib/enums.ts)
+  floor         Int?
+  exclusiveArea Float? // 전용면적(㎡)
+  contractArea  Float? // 계약면적(㎡)
+  landArea      Float? // 대지면적(㎡)
+  builtYear     Int?
+  direction     String?
+  parking       String?
+  appraisalPrice Float?
+  askingPrice    Float?
+  memo           String?
+
+  isAuction  Boolean     @default(false)
+  auctionInfo AuctionInfo?
+
+  radiusSettings String? // JSON: 분석별 반경 오버라이드 (§10)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  evidences       Evidence[]
+  comparableCases ComparableCase[]
+  analysisSnapshots AnalysisSnapshot[]
+  aiReports       AIReport[]
+  importedDocuments ImportedDocument[]
+
+  @@index([propertyType])
+}
+
+// ─────────────────────────────────────────────────────────────
+// 경매 부가정보 (§8)
+// ─────────────────────────────────────────────────────────────
+model AuctionInfo {
+  id String @id @default(cuid())
+
+  propertyId String   @unique
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  caseNumber      String // 사건번호
+  court           String // 법원
+  appraisalPrice  Float?
+  minimumSalePrice Float?
+  failedBidCount  Int?    // 유찰횟수
+  saleDate        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────
+// Evidence — 모든 숫자·AI 판단의 단일 근거 모델 (§52)
+// ─────────────────────────────────────────────────────────────
+model Evidence {
+  id String @id @default(cuid())
+
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  // 어떤 분석 항목에 대한 근거인지 (§12 탭 구조와 매핑되는 카테고리 키)
+  analysisCategory String // 'REAL_TRANSACTION' | 'COMPARABLE_APARTMENT' | 'COMMERCIAL_DISTRICT' 등
+
+  // 표시용 라벨 (예: "인근 아파트 84㎡ 실거래 중앙값")
+  metricLabel String
+  metricValue String // 숫자/문자 혼재 가능 → 문자열로 저장, 표시 시 포맷팅
+  metricUnit  String? // '원', '개', '점' 등
+
+  // 출처
+  sourceOrganization String // 예: '국토교통부', '소상공인시장진흥공단'
+  sourceDataset      String // 예: '아파트 매매 실거래가 자료'
+  sourceUrl          String?
+
+  // 날짜 3분리 원칙 (§4)
+  dataPeriodStart DateTime?
+  dataPeriodEnd   DateTime?
+  asOfDate        DateTime?
+  retrievedAt     DateTime
+
+  // 공간 범위
+  geographicUnit String? // '반경' | '행정동' | '법정동' | '집계구' 등
+  radiusMeters   Int?
+
+  // 표본
+  rawSampleCount      Int?
+  excludedSampleCount Int?
+  usedSampleCount     Int?
+
+  // 방법론
+  filterDescription  String?
+  calculationMethod  String?
+
+  // 데이터 유형 배지 (§5)
+  evidenceType String // 'OFFICIAL' | 'REAL_TRANSACTION' | 'PUBLIC_STATISTICS' | 'PRIVATE' |
+                       // 'USER_PROVIDED' | 'CALCULATED' | 'AI_ANALYSIS' | 'ESTIMATED' | 'PROXY' | 'UNVERIFIED'
+
+  // 신뢰도 (§53, 규칙 기반)
+  confidenceScore  Int?
+  confidenceReason String?
+
+  limitations String? // 한계 설명
+
+  isMock Boolean @default(false) // [DEMO]/[MOCK] 배지 여부 (§65)
+
+  createdAt DateTime @default(now())
+
+  rawDataRecords RawDataRecord[]
+
+  @@index([propertyId, analysisCategory])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Evidence 하위 원자료 (Drill-down, §30)
+// ─────────────────────────────────────────────────────────────
+model RawDataRecord {
+  id String @id @default(cuid())
+
+  evidenceId String
+  evidence   Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  label String // 예: 거래 1건의 요약 라벨
+  payload String // JSON 직렬화된 원자료 (거래일/주소/단지/면적/층/거래금액/거리/단가 등)
+
+  includedInCalculation Boolean @default(true) // 이상치 제외 토글 반영 (§29)
+  isOutlierCandidate    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────
+// 유사사례 (Comparable Engine 결과, §13~30)
+// ─────────────────────────────────────────────────────────────
+model ComparableCase {
+  id String @id @default(cuid())
+
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  caseType String // 'REAL_TRANSACTION' | 'AUCTION' | 'RENTAL' | 'SAME_COMPLEX'
+
+  // 사례 자체 정보
+  address       String?
+  buildingName  String?
+  distanceMeters Float?
+  floor          Int?
+  exclusiveArea  Float?
+  transactionDate DateTime?
+  priceAmount     Float?
+  pricePerArea    Float?
+
+  // 경매 전용 필드
+  caseNumber       String?
+  court            String?
+  minimumSalePrice Float?
+  failedBidCount   Int?
+  bidderCount      Int?
+  winningBidRatio  Float?
+
+  // 임대 전용 필드
+  deposit  Float?
+  monthlyRent Float?
+  managementFee Float?
+  isActualContract Boolean? // true=실제 임대계약, false=호가
+
+  // 유사도
+  similarityScore Int // 0~100
+  similarityReasons String // JSON string[] — "왜 유사한가"
+  similarityGrade String // 'VERY_HIGH' | 'HIGH' | 'COMPARABLE' | 'AUXILIARY' | 'REFERENCE'
+
+  dataSourceType String // 'OFFICIAL' | 'CONNECTED_DATA' | 'USER_UPLOAD'
+
+  createdAt DateTime @default(now())
+
+  @@index([propertyId, caseType])
+}
+
+// ─────────────────────────────────────────────────────────────
+// 분석 스냅샷 (탭 단위 계산 결과 캐시, Evidence 묶음 참조)
+// ─────────────────────────────────────────────────────────────
+model AnalysisSnapshot {
+  id String @id @default(cuid())
+
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  tabKey String // 'SUMMARY' | 'MAP' | 'COMPARABLE' | ... (§12)
+  completionRate Int // 손품 완료도 0~100 (§55)
+  status String // 'OK' | 'PARTIAL' | 'UNAVAILABLE'
+  summaryJson String // 탭 렌더링에 필요한 구조화 데이터
+
+  createdAt DateTime @default(now())
+
+  @@index([propertyId, tabKey])
+}
+
+// ─────────────────────────────────────────────────────────────
+// AI 입지 리포트 (§49~51)
+// ─────────────────────────────────────────────────────────────
+model AIReport {
+  id String @id @default(cuid())
+
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  providerKey String // 'mock' | 'anthropic' | 'openai'
+  sectionsJson String // 리포트 23개 섹션 + 문장별 evidenceIds[]
+
+  createdAt DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────
+// 사용자 자료 Import (§9, §59)
+// ─────────────────────────────────────────────────────────────
+model ImportedDocument {
+  id String @id @default(cuid())
+
+  propertyId String?
+  property   Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  importerType String // 'SCREENSHOT' | 'PDF' | 'CSV' | 'TEXT' | 'HTML' | 'URL'
+  originalFileName String?
+  extractedFieldsJson String // AI Vision/파서가 추출한 후보값
+  approvedFieldsJson  String? // 사용자가 "추출결과 확인" 후 승인한 값만 저장 (§9)
+  status String @default("PENDING_REVIEW") // 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED'
+
+  createdAt DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Provider 응답 캐시 (§60)
+// ─────────────────────────────────────────────────────────────
+model ProviderCache {
+  id String @id @default(cuid())
+
+  providerKey String // 'REAL_TRANSACTION' 등
+  cacheKey    String // 좌표+반경+기간+데이터셋 해시
+  payload     String // JSON 직렬화된 Provider 응답
+  ttlSeconds  Int
+  fetchedAt   DateTime @default(now())
+
+  @@unique([providerKey, cacheKey])
+}
