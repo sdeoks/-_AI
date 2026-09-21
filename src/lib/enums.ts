@@ -132,6 +132,7 @@ export const IMPLEMENTED_TABS: DashboardTabKey[] = [
   "BUSINESS",
   "COMMERCIAL_DISTRICT",
   "TRANSPORT",
+  "RENTAL",
   "AI_REPORT",
   "EVIDENCE",
 ];

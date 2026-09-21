@@ -15,7 +15,7 @@ class NotConnectedProvider<Input> implements DataProvider<Input, never> {
   }
 }
 
-// Population/Business/CommercialDistrict/Transport(+POI)/ApartmentComplex(배후주거)는
-// Phase 2에서 Mock 구현으로 전환되어 src/lib/providers/mock/ 로 이동했다.
-// 아래는 아직 Mock조차 없는(Phase 3~4 예정) Provider만 남긴다.
+// Population/Business/CommercialDistrict/Transport(+POI)/ApartmentComplex(배후주거)/
+// Rental/AuctionComparable은 Mock 구현으로 전환되어 src/lib/providers/mock/ 로 이동했다.
+// 아래는 아직 Mock조차 없는(Phase 4 예정) Provider만 남긴다.
 export const developmentProvider = new NotConnectedProvider("DevelopmentProvider");

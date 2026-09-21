@@ -10,6 +10,8 @@ import { runBusinessDomain } from "./domains/business";
 import { runCommercialDistrictDomain } from "./domains/commercialDistrict";
 import { runTransportDomain } from "./domains/transport";
 import { runResidentialBackupDomain } from "./domains/residentialBackup";
+import { runRentalDomain } from "./domains/rental";
+import { runAuctionComparableDomain } from "./domains/auctionComparable";
 import type { DomainContext, DomainResult } from "./domains/types";
 
 export async function runAnalysisForProperty(propertyId: string) {
@@ -163,24 +165,49 @@ export async function runAnalysisForProperty(propertyId: string) {
     seed: `${property.id}:${property.address}`,
   };
 
+  const domainKeys = [
+    "POPULATION",
+    "BUSINESS",
+    "COMMERCIAL_DISTRICT",
+    "TRANSPORT",
+    "RESIDENTIAL_BACKUP",
+    "RENTAL",
+  ] as const;
   const domainSettled = await Promise.allSettled([
     runPopulationDomain(domainCtx),
     runBusinessDomain(domainCtx),
     runCommercialDistrictDomain(domainCtx),
     runTransportDomain(domainCtx),
     runResidentialBackupDomain(domainCtx),
+    runRentalDomain(domainCtx),
   ]);
   const domainResults: DomainResult[] = domainSettled.map((r, i) =>
     r.status === "fulfilled"
       ? r.value
       : {
-          tabKey: (["POPULATION", "BUSINESS", "COMMERCIAL_DISTRICT", "TRANSPORT", "RESIDENTIAL_BACKUP"] as const)[i],
+          tabKey: domainKeys[i],
           status: "UNAVAILABLE" as const,
           completionRate: 0,
           evidenceIds: [],
           summary: { error: String(r.reason) },
         },
   );
+
+  // 경매 낙찰사례는 ③ 유사사례 탭에 속하므로(§13) 별도 AnalysisSnapshot을 만들지 않고
+  // Evidence/ComparableCase만 기존 COMPARABLE 스냅샷에 얹는다.
+  const auctionResultSettled = await Promise.allSettled([
+    runAuctionComparableDomain(domainCtx),
+  ]);
+  const auctionResult: DomainResult =
+    auctionResultSettled[0].status === "fulfilled"
+      ? auctionResultSettled[0].value
+      : {
+          tabKey: "COMPARABLE",
+          status: "UNAVAILABLE",
+          completionRate: 0,
+          evidenceIds: [],
+          summary: { error: String(auctionResultSettled[0].reason) },
+        };
 
   await prisma.analysisSnapshot.createMany({
     data: domainResults.map((d) => ({
@@ -205,6 +232,8 @@ export async function runAnalysisForProperty(propertyId: string) {
     transactionEvidenceId: transactionEvidence.id,
     comparableEvidenceId: comparableEvidence.id,
     domainByTab,
+    auctionResult,
+    isAuction: property.isAuction,
   });
 
   await prisma.aIReport.create({
@@ -225,7 +254,6 @@ export async function runAnalysisForProperty(propertyId: string) {
       status: engineResult.usedSampleCount > 0 ? "OK" : "PARTIAL",
     },
     { tabKey: "TRANSACTION", completionRate: 100, status: "OK" },
-    { tabKey: "RENTAL", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "DEVELOPMENT", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "SUPPLY_VACANCY", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "LAND_BUILDING", completionRate: 0, status: "UNAVAILABLE" },
@@ -282,10 +310,28 @@ function buildAIReportSections(args: {
   transactionEvidenceId: string;
   comparableEvidenceId: string;
   domainByTab: Partial<Record<DashboardTabKey, DomainResult>>;
+  auctionResult: DomainResult;
+  isAuction: boolean;
 }): AISection[] {
-  const { property, engineResult, transactionEvidenceId, comparableEvidenceId, domainByTab } =
-    args;
+  const {
+    property,
+    engineResult,
+    transactionEvidenceId,
+    comparableEvidenceId,
+    domainByTab,
+    auctionResult,
+    isAuction,
+  } = args;
   const top5 = engineResult.candidates.slice(0, 5);
+  const rental = domainByTab.RENTAL;
+  const rentalSummary =
+    rental?.status === "OK"
+      ? (rental.summary as { medianMonthlyRent: number; actualCount: number; hoGaCount: number })
+      : null;
+  const auctionSummary =
+    auctionResult.status === "OK"
+      ? (auctionResult.summary as { cases: unknown[]; medianRatio: number })
+      : null;
 
   const population = domainByTab.POPULATION;
   const business = domainByTab.BUSINESS;
@@ -332,6 +378,35 @@ function buildAIReportSections(args: {
           evidenceIds: [comparableEvidenceId],
         },
       ],
+    },
+    {
+      key: "AUCTION_ANALYSIS",
+      title: "5. 유사 경매 분석",
+      status: isAuction && auctionSummary ? "OK" : "NO_DATA",
+      paragraphs:
+        isAuction && auctionSummary
+          ? [
+              {
+                text: `반경 내 유사 경매 낙찰사례 ${auctionSummary.cases.length}건의 낙찰가율 중앙값은 ${(auctionSummary.medianRatio * 100).toFixed(1)}%입니다.`,
+                evidenceIds: auctionResult.headlineEvidenceId ? [auctionResult.headlineEvidenceId] : [],
+              },
+            ]
+          : !isAuction
+            ? [{ text: "일반 매매물건은 경매 낙찰사례 분석 대상이 아닙니다.", evidenceIds: [] }]
+            : [],
+    },
+    {
+      key: "RENTAL_ANALYSIS",
+      title: "6. 임대시장 분석",
+      status: rentalSummary ? "OK" : "NO_DATA",
+      paragraphs: rentalSummary
+        ? [
+            {
+              text: `예상 월세는 ${formatWon(rentalSummary.medianMonthlyRent)} 수준입니다 (실제계약 ${rentalSummary.actualCount}건, 호가 ${rentalSummary.hoGaCount}건 기준). ${rentalSummary.actualCount < 3 ? "실제계약 표본이 적어 호가 비중이 높은 추정치입니다." : ""}`,
+              evidenceIds: rental?.headlineEvidenceId ? [rental.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
     },
     {
       key: "TRADING_VOLUME_LIQUIDITY",
@@ -470,7 +545,7 @@ function buildAIReportSections(args: {
       status: "OK",
       paragraphs: [
         {
-          text: "임대시장, 경매 낙찰사례, 개발계획, 신규공급·공실위험, 토지·건물 상세정보는 이번 분석에서 공식 데이터 연동이 아직 구현되지 않아 다루지 않았습니다. 인구·사업체·상권·교통·배후주거는 [MOCK] 데이터 기반입니다 (§ 데이터 근거 탭 참고).",
+          text: "개발계획, 신규공급·공실위험, 토지·건물 상세정보는 이번 분석에서 공식 데이터 연동이 아직 구현되지 않아 다루지 않았습니다. 인구·사업체·상권·교통·배후주거·임대·경매는 모두 [MOCK] 데이터 기반입니다 (§ 데이터 근거 탭 참고).",
           evidenceIds: [],
         },
       ],

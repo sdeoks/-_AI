@@ -19,6 +19,7 @@ import { BusinessTab, type BusinessSummary } from "./BusinessTab";
 import { CommercialDistrictTab, type CommercialDistrictSummary } from "./CommercialDistrictTab";
 import { TransportTab, type TransportSummary } from "./TransportTab";
 import { ResidentialBackupTab, type ResidentialBackupSummary } from "./ResidentialBackupTab";
+import { RentalTab, type RentalSummary } from "./RentalTab";
 
 interface PropertyLike {
   id: string;
@@ -106,6 +107,12 @@ export function PropertyDashboard({
   const footfallEvidence = evidenceCards.find((e) => e.analysisCategory === "FOOTFALL_PROXY") ?? null;
   const transportEvidence = evidenceCards.find((e) => e.analysisCategory === "TRANSPORT_NEAREST") ?? null;
   const residentialEvidence = evidenceCards.find((e) => e.analysisCategory === "RESIDENTIAL_BACKUP_HOUSEHOLDS") ?? null;
+  const rentalEvidence = evidenceCards.find((e) => e.analysisCategory === "RENTAL_EXPECTED_MONTHLY") ?? null;
+
+  const transactionComparableCases = comparableCases.filter(
+    (c) => c.caseType !== "AUCTION" && c.caseType !== "RENTAL",
+  );
+  const auctionComparableCases = comparableCases.filter((c) => c.caseType === "AUCTION");
 
   const snapshotByTab = useMemo(() => {
     const map = new Map<string, unknown>();
@@ -124,6 +131,7 @@ export function PropertyDashboard({
   const commercialSummary = snapshotByTab.get("COMMERCIAL_DISTRICT") as CommercialDistrictSummary | null;
   const transportSummary = snapshotByTab.get("TRANSPORT") as TransportSummary | null;
   const residentialSummary = snapshotByTab.get("RESIDENTIAL_BACKUP") as ResidentialBackupSummary | null;
+  const rentalSummary = snapshotByTab.get("RENTAL") as RentalSummary | null;
 
   const transactionPoints = (overallEvidence?.rawDataRecords ?? []).map((r) => {
     const payload = JSON.parse(r.payload);
@@ -188,7 +196,9 @@ export function PropertyDashboard({
           <p className="text-sm text-slate-500">좌표 확인 필요 (지오코딩 실패)</p>
         );
       case "COMPARABLE":
-        return <ComparableTab cases={comparableCases} />;
+        return (
+          <ComparableTab cases={transactionComparableCases} auctionCases={auctionComparableCases} />
+        );
       case "TRANSACTION":
         return <TransactionTab evidence={overallEvidence} points={transactionPoints} />;
       case "AI_REPORT":
@@ -200,12 +210,7 @@ export function PropertyDashboard({
       case "EVIDENCE":
         return <EvidenceTab evidences={evidenceCards} highlightId={highlightEvidenceId} />;
       case "RENTAL":
-        return (
-          <NotImplementedTab
-            title="⑤ 임대시장"
-            candidateSources={["국토교통부 전월세 실거래가", "사용자 업로드 임대 호가 자료"]}
-          />
-        );
+        return <RentalTab evidence={rentalEvidence} summary={rentalSummary} />;
       case "RESIDENTIAL_BACKUP":
         return <ResidentialBackupTab evidence={residentialEvidence} summary={residentialSummary} />;
       case "POPULATION":
