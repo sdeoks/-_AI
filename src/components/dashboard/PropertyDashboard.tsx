@@ -13,7 +13,6 @@ import { ComparableTab, type ComparableCaseRow } from "./ComparableTab";
 import { TransactionTab } from "./TransactionTab";
 import { AIReportTab, type AISection } from "./AIReportTab";
 import { EvidenceTab } from "./EvidenceTab";
-import { NotImplementedTab } from "./NotImplementedTab";
 import { PopulationTab, type PopulationSummary } from "./PopulationTab";
 import { BusinessTab, type BusinessSummary } from "./BusinessTab";
 import { CommercialDistrictTab, type CommercialDistrictSummary } from "./CommercialDistrictTab";
@@ -22,6 +21,7 @@ import { ResidentialBackupTab, type ResidentialBackupSummary } from "./Residenti
 import { RentalTab, type RentalSummary } from "./RentalTab";
 import { DevelopmentTab, type DevelopmentSummary } from "./DevelopmentTab";
 import { SupplyVacancyTab, type SupplyVacancySummary } from "./SupplyVacancyTab";
+import { LandBuildingTab, type LandBuildingSummary } from "./LandBuildingTab";
 
 interface PropertyLike {
   id: string;
@@ -112,6 +112,8 @@ export function PropertyDashboard({
   const rentalEvidence = evidenceCards.find((e) => e.analysisCategory === "RENTAL_EXPECTED_MONTHLY") ?? null;
   const developmentEvidence = evidenceCards.find((e) => e.analysisCategory === "DEVELOPMENT_PLANS") ?? null;
   const vacancyEvidence = evidenceCards.find((e) => e.analysisCategory === "VACANCY_RISK") ?? null;
+  const landBuildingEvidence = evidenceCards.find((e) => e.analysisCategory === "LAND_BUILDING_INFO") ?? null;
+  const environmentEvidence = evidenceCards.find((e) => e.analysisCategory === "ENVIRONMENT_RISK") ?? null;
 
   const transactionComparableCases = comparableCases.filter(
     (c) => c.caseType !== "AUCTION" && c.caseType !== "RENTAL",
@@ -138,6 +140,7 @@ export function PropertyDashboard({
   const rentalSummary = snapshotByTab.get("RENTAL") as RentalSummary | null;
   const developmentSummary = snapshotByTab.get("DEVELOPMENT") as DevelopmentSummary | null;
   const supplyVacancySummary = snapshotByTab.get("SUPPLY_VACANCY") as SupplyVacancySummary | null;
+  const landBuildingSummary = snapshotByTab.get("LAND_BUILDING") as LandBuildingSummary | null;
   const competitionByCategory = commercialSummary?.byCategory ?? null;
 
   const transactionPoints = (overallEvidence?.rawDataRecords ?? []).map((r) => {
@@ -250,9 +253,10 @@ export function PropertyDashboard({
         );
       case "LAND_BUILDING":
         return (
-          <NotImplementedTab
-            title="⑬ 환경·토지·건물"
-            candidateSources={["국토교통부 건축HUB", "VWorld 토지이용계획"]}
+          <LandBuildingTab
+            buildingEvidence={landBuildingEvidence}
+            environmentEvidence={environmentEvidence}
+            summary={landBuildingSummary}
           />
         );
       default:

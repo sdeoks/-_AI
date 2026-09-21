@@ -14,6 +14,7 @@ import { runRentalDomain } from "./domains/rental";
 import { runAuctionComparableDomain } from "./domains/auctionComparable";
 import { runDevelopmentDomain } from "./domains/development";
 import { runSupplyVacancyDomain } from "./domains/supplyVacancy";
+import { runLandBuildingDomain } from "./domains/landBuilding";
 import type { DomainContext, DomainResult } from "./domains/types";
 
 export async function runAnalysisForProperty(propertyId: string) {
@@ -60,6 +61,10 @@ export async function runAnalysisForProperty(propertyId: string) {
   }
 
   const records = txResult.data.records;
+
+  // 가격 추세 참고용: 분석기간을 절반으로 나눠 전반기/후반기 ㎡당 단가 중앙값 비교
+  // (§7, §31 — 별도 가격지수 없이 원자료로 계산한 [계산] 값)
+  const priceTrend = computeSimpleTrend(records, monthsBack);
 
   // 2) 실거래 전체 통계 Evidence (탭 ④)
   const allPrices = records.map((r) => ({ value: r.priceAmount, weight: 1 }));
@@ -175,6 +180,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     "RESIDENTIAL_BACKUP",
     "RENTAL",
     "DEVELOPMENT",
+    "LAND_BUILDING",
   ] as const;
   const domainSettled = await Promise.allSettled([
     runPopulationDomain(domainCtx),
@@ -184,6 +190,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     runResidentialBackupDomain(domainCtx),
     runRentalDomain(domainCtx),
     runDevelopmentDomain(domainCtx),
+    runLandBuildingDomain(domainCtx),
   ]);
   const domainResults: DomainResult[] = domainSettled.map((r, i) =>
     r.status === "fulfilled"
@@ -259,6 +266,7 @@ export async function runAnalysisForProperty(propertyId: string) {
     domainByTab,
     auctionResult,
     isAuction: property.isAuction,
+    priceTrend,
   });
 
   await prisma.aIReport.create({
@@ -279,7 +287,6 @@ export async function runAnalysisForProperty(propertyId: string) {
       status: engineResult.usedSampleCount > 0 ? "OK" : "PARTIAL",
     },
     { tabKey: "TRANSACTION", completionRate: 100, status: "OK" },
-    { tabKey: "LAND_BUILDING", completionRate: 0, status: "UNAVAILABLE" },
     { tabKey: "AI_REPORT", completionRate: 100, status: "OK" },
     { tabKey: "EVIDENCE", completionRate: 100, status: "OK" },
   ] as const;
@@ -314,6 +321,41 @@ function monthsAgoDate(months: number): Date {
   return d;
 }
 
+interface PriceTrend {
+  earlierMedianPerArea: number;
+  recentMedianPerArea: number;
+  changePct: number;
+  earlierCount: number;
+  recentCount: number;
+}
+
+function computeSimpleTrend(
+  records: { transactionDate: string; priceAmount: number; exclusiveArea: number }[],
+  monthsBack: number,
+): PriceTrend | null {
+  if (records.length < 6) return null;
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - monthsBack / 2);
+
+  const earlier = records.filter((r) => new Date(r.transactionDate) < cutoff);
+  const recent = records.filter((r) => new Date(r.transactionDate) >= cutoff);
+  if (earlier.length < 2 || recent.length < 2) return null;
+
+  const medianPerArea = (arr: typeof records) => {
+    const sorted = [...arr].map((r) => r.priceAmount / r.exclusiveArea).sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+
+  const earlierMedianPerArea = Math.round(medianPerArea(earlier));
+  const recentMedianPerArea = Math.round(medianPerArea(recent));
+  const changePct =
+    earlierMedianPerArea > 0
+      ? Math.round(((recentMedianPerArea - earlierMedianPerArea) / earlierMedianPerArea) * 1000) / 10
+      : 0;
+
+  return { earlierMedianPerArea, recentMedianPerArea, changePct, earlierCount: earlier.length, recentCount: recent.length };
+}
+
 interface AIParagraph {
   text: string;
   evidenceIds: string[];
@@ -335,6 +377,7 @@ function buildAIReportSections(args: {
   domainByTab: Partial<Record<DashboardTabKey, DomainResult>>;
   auctionResult: DomainResult;
   isAuction: boolean;
+  priceTrend: PriceTrend | null;
 }): AISection[] {
   const {
     property,
@@ -344,6 +387,7 @@ function buildAIReportSections(args: {
     domainByTab,
     auctionResult,
     isAuction,
+    priceTrend,
   } = args;
   const top5 = engineResult.candidates.slice(0, 5);
   const rental = domainByTab.RENTAL;
@@ -365,7 +409,7 @@ function buildAIReportSections(args: {
   const popSummary = population?.status === "OK" ? (population.summary as { totalPopulation: number; ageBrackets: { label: string; ratio: number }[] }) : null;
   const bizSummary = business?.status === "OK" ? (business.summary as { businessCount: number; employeeCount: number; purchasingPowerIndex: number }) : null;
   const commSummary = commercial?.status === "OK" ? (commercial.summary as { totalStoreCount: number; radiusMeters: number; footfallProxyIndex: number }) : null;
-  const transportSummary = transport?.status === "OK" ? (transport.summary as { nearestSubway: { name: string; distanceMeters: number } | null }) : null;
+  const transportSummary = transport?.status === "OK" ? (transport.summary as { nearestSubway: { name: string; distanceMeters: number } | null; poiList: { category: string }[] }) : null;
   const residentialSummary = residential?.status === "OK" ? (residential.summary as { confirmedHouseholds: number; totalComplexes: number; unconfirmedComplexCount: number }) : null;
   const development = domainByTab.DEVELOPMENT;
   const supplyVacancy = domainByTab.SUPPLY_VACANCY;
@@ -383,6 +427,34 @@ function buildAIReportSections(args: {
           evidenceIds: [comparableEvidenceId],
         },
       ],
+    },
+    {
+      key: "LOCATION_CHARACTERISTICS",
+      title: "2. 입지 특성",
+      status: residentialSummary || transportSummary || commSummary ? "OK" : "NO_DATA",
+      paragraphs:
+        residentialSummary || transportSummary || commSummary
+          ? [
+              {
+                text: [
+                  residentialSummary
+                    ? `반경 내 공동주택 ${residentialSummary.totalComplexes}개 단지`
+                    : null,
+                  transportSummary?.nearestSubway
+                    ? `${transportSummary.nearestSubway.name}까지 직선거리 약 ${transportSummary.nearestSubway.distanceMeters}m`
+                    : null,
+                  commSummary ? `반경 내 점포 ${commSummary.totalStoreCount}개` : null,
+                ]
+                  .filter(Boolean)
+                  .join(", ") + "를 종합하면 해당 물건은 주거·상권 인프라가 일정 수준 형성된 입지로 판단됩니다.",
+                evidenceIds: [
+                  residential?.headlineEvidenceId,
+                  transport?.headlineEvidenceId,
+                  commercial?.evidenceIds?.[0],
+                ].filter((id): id is string => !!id),
+              },
+            ]
+          : [],
     },
     {
       key: "TOP5_COMPARABLE",
@@ -434,6 +506,24 @@ function buildAIReportSections(args: {
             },
           ]
         : [],
+    },
+    {
+      key: "PRICE_TREND",
+      title: "7. 가격 추세",
+      status: priceTrend ? "OK" : "NO_DATA",
+      paragraphs: priceTrend
+        ? [
+            {
+              text: `분석기간을 전/후반으로 나누면 ㎡당 단가 중앙값이 ${formatWon(priceTrend.earlierMedianPerArea)}(전반기 N=${priceTrend.earlierCount}) → ${formatWon(priceTrend.recentMedianPerArea)}(후반기 N=${priceTrend.recentCount})로 ${priceTrend.changePct >= 0 ? "+" : ""}${priceTrend.changePct}% 변화했습니다. 공식 가격지수가 아닌 원자료 직접 계산값입니다.`,
+              evidenceIds: [transactionEvidenceId],
+            },
+          ]
+        : [
+            {
+              text: "표본이 부족해 신뢰할 수 있는 가격 추세를 계산하지 못했습니다.",
+              evidenceIds: [],
+            },
+          ],
     },
     {
       key: "TRADING_VOLUME_LIQUIDITY",
@@ -534,6 +624,19 @@ function buildAIReportSections(args: {
               text: transportSummary.nearestSubway
                 ? `가장 가까운 지하철역은 ${transportSummary.nearestSubway.name}으로 직선거리 약 ${transportSummary.nearestSubway.distanceMeters}m입니다.`
                 : "반경 내 지하철역이 확인되지 않았습니다.",
+              evidenceIds: transport?.headlineEvidenceId ? [transport.headlineEvidenceId] : [],
+            },
+          ]
+        : [],
+    },
+    {
+      key: "LIVING_INFRA",
+      title: "16. 생활인프라",
+      status: transportSummary ? "OK" : "NO_DATA",
+      paragraphs: transportSummary
+        ? [
+            {
+              text: `학교·병원·마트 등 생활인프라 POI ${transportSummary.poiList.length}건이 반경 내에서 확인됩니다 (직선거리 기반).`,
               evidenceIds: transport?.headlineEvidenceId ? [transport.headlineEvidenceId] : [],
             },
           ]

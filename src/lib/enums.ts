@@ -135,6 +135,7 @@ export const IMPLEMENTED_TABS: DashboardTabKey[] = [
   "RENTAL",
   "DEVELOPMENT",
   "SUPPLY_VACANCY",
+  "LAND_BUILDING",
   "AI_REPORT",
   "EVIDENCE",
 ];
